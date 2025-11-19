@@ -1,14 +1,17 @@
-// hooks/usePermissionsScanner.ts
-import { useState, useEffect } from 'react';
-import * as Application from 'expo-application';
+// services/usePermissionsScanner.ts
+import { useCallback, useEffect, useState } from 'react';
 import { Platform } from 'react-native';
-
 export interface AppPermission {
   appName: string;
   packageName: string;
   permissions: string[];
   riskyPermissions: string[];
   riskLevel: 'high' | 'medium' | 'low';
+}
+interface InstalledApp {
+  appName: string;
+  packageName: string;
+  permissions: string[];
 }
 
 const RISKY_PERMISSIONS = [
@@ -28,7 +31,7 @@ export function usePermissionsScanner() {
   const [apps, setApps] = useState<AppPermission[]>([]);
   const [riskyApps, setRiskyApps] = useState<AppPermission[]>([]);
 
-  const scanPermissions = async () => {
+  const scanPermissions = useCallback(async () => {
     if (Platform.OS !== 'android') {
       // iOS doesn't allow querying other apps' permissions
       console.warn('Permission scanning only available on Android');
@@ -37,12 +40,14 @@ export function usePermissionsScanner() {
 
     setLoading(true);
 
+    let appsWithPermissions: AppPermission[] = [];
+
     try {
       // Note: This requires a native module to access PackageManager
       // Placeholder implementation
       const installedApps = await getInstalledApps();
       
-      const appsWithPermissions: AppPermission[] = installedApps.map(app => {
+      appsWithPermissions = installedApps.map(app => {
         const riskyPerms = app.permissions.filter(p => 
           RISKY_PERMISSIONS.includes(p)
         );
@@ -57,15 +62,16 @@ export function usePermissionsScanner() {
       setApps(appsWithPermissions);
       setRiskyApps(appsWithPermissions.filter(app => app.riskLevel === 'high'));
     } catch (error) {
-      console.error('[PERMISSION_SCAN_ERROR]', error);
+      // If scanning fails, fall back to an empty list (or previous state)
+      setRiskyApps(appsWithPermissions.filter(app => app.riskLevel !== 'low'));
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     scanPermissions();
-  }, []);
+  }, [scanPermissions]);
 
   return {
     loading,
@@ -76,7 +82,7 @@ export function usePermissionsScanner() {
 }
 
 // Placeholder - requires native module
-async function getInstalledApps(): Promise<AppPermission[]> {
+async function getInstalledApps(): Promise<InstalledApp[]> {
   // This would use a native module to access Android PackageManager
   // For now, return empty array
   return [];

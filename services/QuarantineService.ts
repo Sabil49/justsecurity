@@ -1,7 +1,6 @@
 // services/QuarantineService.ts
-import * as FileSystem from 'expo-file-system';
-import { api } from './api';
-import { storage } from '../utils/storage';
+import { Directory, File, Paths } from 'expo-file-system/next';
+import { getDeviceId } from '../utils/storage';
 
 export interface QuarantinedFile {
   id: string;
@@ -16,15 +15,24 @@ export interface QuarantinedFile {
 }
 
 class QuarantineService {
-  private readonly QUARANTINE_DIR = `${FileSystem.documentDirectory}quarantine/`;
+  private quarantineDir: Directory;
 
-  async initialize() {
-    // Create quarantine directory
-    const dirInfo = await FileSystem.getInfoAsync(this.QUARANTINE_DIR);
-    if (!dirInfo.exists) {
-      await FileSystem.makeDirectoryAsync(this.QUARANTINE_DIR, {
-        intermediates: true,
-      });
+  constructor() {
+    // Initialize quarantine directory in documents
+    const quarantinePath = `${Paths.document}/quarantine`;
+    this.quarantineDir = new Directory(quarantinePath);
+  }
+
+  async initialize(): Promise<void> {
+    try {
+      // Create quarantine directory if it doesn't exist
+      if (!this.quarantineDir.exists) {
+        await this.quarantineDir.create();
+      }
+      console.log('[QUARANTINE_INITIALIZED]', this.quarantineDir.uri);
+    } catch (error) {
+      console.error('[QUARANTINE_INIT_ERROR]', error);
+      throw error;
     }
   }
 
@@ -36,23 +44,25 @@ class QuarantineService {
     severity: string
   ): Promise<string> {
     try {
-      // Get file info
-      const fileInfo = await FileSystem.getInfoAsync(filePath, { size: true });
-      
-      if (!fileInfo.exists) {
+      const sourceFile = new File(filePath);
+
+      // Check if source file exists
+      if (!sourceFile.exists) {
         throw new Error('File does not exist');
       }
 
+      const fileSize = sourceFile.size || 0;
+
+      // Create quarantined file path using hash as filename
+      const quarantinePath = `${this.quarantineDir.uri}/${fileHash}`;
+      const destinationFile = new File(quarantinePath);
+
       // Move file to quarantine directory
-      const quarantinePath = `${this.QUARANTINE_DIR}${fileHash}`;
-      await FileSystem.moveAsync({
-        from: filePath,
-        to: quarantinePath,
-      });
+      await sourceFile.move(destinationFile);
 
       // Create quarantine record via API
-      const deviceId = await storage.getDeviceId();
-      const response = await api.post('/scan/report', {
+      const deviceId = await getDeviceId();
+      await process.env.API_URL.post('/scan/report', {
         deviceId,
         scanType: 'custom',
         status: 'completed',
@@ -71,7 +81,7 @@ class QuarantineService {
         ],
       });
 
-      console.log('[FILE_QUARANTINED]', fileName);
+      console.log('[FILE_QUARANTINED]', fileName, quarantinePath);
       return quarantinePath;
     } catch (error) {
       console.error('[QUARANTINE_ERROR]', error);
@@ -81,29 +91,42 @@ class QuarantineService {
 
   async uploadQuarantinedFile(quarantineId: string, filePath: string): Promise<void> {
     try {
-      // Get file info
-      const fileInfo = await FileSystem.getInfoAsync(filePath, { size: true });
-      
-      if (!fileInfo.exists || !fileInfo.size) {
+      const file = new File(filePath);
+
+      // Check if file exists and get size
+      if (!file.exists) {
         throw new Error('Invalid file');
       }
 
+      const fileSize = file.size;
+      if (!fileSize) {
+        throw new Error('File has no size');
+      }
+
       // Request signed upload URL
-      const response = await api.post('/quarantine/signed-upload', {
+      const response = await process.env.API_URL.post('/quarantine/signed-upload', {
         quarantineId,
-        fileSize: fileInfo.size,
+        fileSize,
         contentType: 'application/octet-stream',
       });
 
       const { uploadUrl, storageKey } = response.data;
 
-      // Upload file to S3
-      await FileSystem.uploadAsync(uploadUrl, filePath, {
-        httpMethod: 'PUT',
+      // Read file as bytes
+      const fileBytes = await file.bytes();
+
+      // Upload to S3 using fetch
+      const uploadResponse = await fetch(uploadUrl, {
+        method: 'PUT',
         headers: {
           'Content-Type': 'application/octet-stream',
         },
+        body: fileBytes,
       });
+
+      if (!uploadResponse.ok) {
+        throw new Error(`Upload failed with status ${uploadResponse.status}`);
+      }
 
       console.log('[FILE_UPLOADED]', storageKey);
     } catch (error) {
@@ -114,11 +137,15 @@ class QuarantineService {
 
   async deleteQuarantinedFile(quarantineId: string, filePath: string): Promise<void> {
     try {
-      // Delete local file
-      await FileSystem.deleteAsync(filePath, { idempotent: true });
+      const file = new File(filePath);
+
+      // Delete local file if it exists
+      if (file.exists) {
+        await file.delete();
+      }
 
       // Notify backend
-      await api.post('/quarantine/delete', {
+      await process.env.API_URL.post('/quarantine/delete', {
         quarantineId,
       });
 
@@ -131,11 +158,16 @@ class QuarantineService {
 
   async restoreQuarantinedFile(filePath: string, originalPath: string): Promise<void> {
     try {
+      const sourceFile = new File(filePath);
+      const destinationFile = new File(originalPath);
+
+      // Check if source exists
+      if (!sourceFile.exists) {
+        throw new Error('Quarantined file does not exist');
+      }
+
       // Move file back to original location
-      await FileSystem.moveAsync({
-        from: filePath,
-        to: originalPath,
-      });
+      await sourceFile.move(destinationFile);
 
       console.log('[FILE_RESTORED]', originalPath);
     } catch (error) {
@@ -146,9 +178,10 @@ class QuarantineService {
 
   async listQuarantinedFiles(): Promise<QuarantinedFile[]> {
     try {
-      const response = await api.get('/quarantine/list', {
+      const deviceId = await getDeviceId();
+      const response = await process.env.API_URL.get('/quarantine/list', {
         params: {
-          deviceId: await storage.getDeviceId(),
+          deviceId,
         },
       });
 
@@ -162,17 +195,51 @@ class QuarantineService {
   async clearAllQuarantine(): Promise<void> {
     try {
       // Delete quarantine directory
-      await FileSystem.deleteAsync(this.QUARANTINE_DIR, { idempotent: true });
+      if (this.quarantineDir.exists) {
+        await this.quarantineDir.delete();
+      }
 
       // Recreate directory
-      await FileSystem.makeDirectoryAsync(this.QUARANTINE_DIR, {
-        intermediates: true,
-      });
+      await this.quarantineDir.create();
 
       console.log('[QUARANTINE_CLEARED]');
     } catch (error) {
       console.error('[CLEAR_QUARANTINE_ERROR]', error);
       throw error;
+    }
+  }
+
+  async getQuarantineStats(): Promise<{
+    totalFiles: number;
+    totalSize: number;
+  }> {
+    try {
+      if (!this.quarantineDir.exists) {
+        return { totalFiles: 0, totalSize: 0 };
+      }
+
+      const files = await this.quarantineDir.list();
+      let totalSize = 0;
+
+      for (const fileName of files) {
+        try {
+          const filePath = `${this.quarantineDir.uri}/${fileName}`;
+          const file = new File(filePath);
+          if (file.exists && file.size) {
+            totalSize += file.size;
+          }
+        } catch (error) {
+          console.warn('[STAT_FILE_ERROR]', fileName, error);
+        }
+      }
+
+      return {
+        totalFiles: files.length,
+        totalSize,
+      };
+    } catch (error) {
+      console.error('[GET_STATS_ERROR]', error);
+      return { totalFiles: 0, totalSize: 0 };
     }
   }
 }

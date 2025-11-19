@@ -1,10 +1,10 @@
 // services/AntiTheftService.ts
+import { Audio } from 'expo-av';
+import * as Device from 'expo-device';
+import * as FileSystem from 'expo-file-system';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
-import * as Device from 'expo-device';
-import { Audio } from 'expo-av';
-import { Platform, Alert } from 'react-native';
-import { api } from './api';
+import { Alert, Platform } from 'react-native';
 import { storage } from '../utils/storage';
 
 export interface AntiTheftCommand {
@@ -15,29 +15,37 @@ export interface AntiTheftCommand {
 
 class AntiTheftService {
   private sound: Audio.Sound | null = null;
-  private isLocked = false;
-
+  private isLocked: boolean | null = null;
+  private notificationSubscription: any = null;
   async initialize() {
+       // Initialize lock state from storage
+    this.isLocked = await this.isDeviceLocked();
+
     // Register for push notifications
     await this.registerPushToken();
-
     // Set up notification handler
     Notifications.setNotificationHandler({
       handleNotification: async (notification) => {
         const data = notification.request.content.data;
 
-        if (data.type === 'anti_theft_command') {
-          await this.handleCommand({
-            id: data.commandId,
-            commandType: data.commandType,
-            metadata: JSON.parse(data.metadata || '{}'),
-          });
+        if (data?.type === 'anti_theft_command') {
+          try {
+            await this.handleCommand({
+              id: data.commandId as string,
+              commandType: data.commandType as 'locate' | 'ring' | 'lock' | 'wipe',
+              metadata: JSON.parse(data.metadata as string || '{}'),
+            });
+          } catch (error) {
+            console.error('[COMMAND_PARSE_ERROR]', error);
+          }
 
-          // Return null to prevent showing notification
+          // Do not present a visible notification for anti-theft commands
           return {
             shouldShowAlert: false,
             shouldPlaySound: false,
             shouldSetBadge: false,
+            shouldShowBanner: false,
+            shouldShowList: false,
           };
         }
 
@@ -45,22 +53,29 @@ class AntiTheftService {
           shouldShowAlert: true,
           shouldPlaySound: true,
           shouldSetBadge: true,
+          shouldShowBanner: true,
+          shouldShowList: true,
         };
       },
     });
 
-    // Listen for notification responses
-    Notifications.addNotificationResponseReceivedListener(async (response) => {
+    // Listen for notification responses (when user taps on a notification)
+    this.notificationSubscription = Notifications.addNotificationResponseReceivedListener(async (response) => {
       const data = response.notification.request.content.data;
-      
-      if (data.type === 'anti_theft_command') {
-        await this.handleCommand({
-          id: data.commandId,
-          commandType: data.commandType,
-          metadata: JSON.parse(data.metadata || '{}'),
-        });
+
+      if (data?.type === 'anti_theft_command') {
+        try {
+          await this.handleCommand({
+            id: data.commandId as string,
+            commandType: data.commandType as 'locate' | 'ring' | 'lock' | 'wipe',
+            metadata: JSON.parse(data.metadata as string || '{}'),
+          });
+        } catch (error) {
+          console.error('[COMMAND_PARSE_ERROR]', error);
+        }
       }
     });
+
   }
 
   private async registerPushToken() {
@@ -78,13 +93,18 @@ class AntiTheftService {
         return;
       }
 
-      const token = (await Notifications.getExpoPushTokenAsync({
-        projectId: process.env.EXPO_PROJECT_ID,
-      })).data;
+      const projectId = process.env.EXPO_PROJECT_ID;
+      if (!projectId) {
+        console.error('EXPO_PROJECT_ID environment variable not set');
+        return;
+      }
 
+      const token = (await Notifications.getExpoPushTokenAsync({
+        projectId,
+      })).data;
       // Register token with backend
       const deviceId = await storage.getDeviceId();
-      await api.post('/device/register', {
+      await process.env.API_URL.post('/device/register', {
         deviceId,
         deviceName: Device.deviceName || 'Unknown Device',
         platform: Platform.OS,
@@ -134,7 +154,7 @@ class AntiTheftService {
       const deviceId = await storage.getDeviceId();
 
       // Send location to backend
-      await api.post('/device/location', {
+      await process.env.API_URL.post('/device/location', {
         deviceId,
         commandId: command.id,
         latitude: location.coords.latitude,

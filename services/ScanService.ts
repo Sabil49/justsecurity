@@ -1,8 +1,7 @@
 // services/ScanService.ts
-import * as FileSystem from 'expo-file-system';
 import * as Crypto from 'expo-crypto';
+import { Directory, File, Paths } from 'expo-file-system/next';
 import { Platform } from 'react-native';
-import { api } from './api';
 
 export interface ScanFile {
   uri: string;
@@ -27,22 +26,56 @@ export interface ScanProgress {
   currentFile?: string;
 }
 
+interface HashCheckResult {
+  hash: string;
+  isThreat: boolean;
+  threatName?: string;
+  severity?: string;
+  category?: string;
+}
+
+interface HashCheckResponse {
+  results: HashCheckResult[];
+}
+
+export type PathSanitizationMode = 'relative' | 'home' | 'filename' | 'hashed' | 'none';
+
+export interface ScanOptions {
+  pathSanitization?: PathSanitizationMode;
+  root?: string;
+  hashSalt?: string;
+}
+
+// API client placeholder - replace with your actual API client
+const api = {
+  post: async <T = any>(endpoint: string, data: any): Promise<{ data: T }> => {
+    const response = await fetch(`${process.env.API_URL}${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    return { data: await response.json() };
+  },
+};
+
 class ScanService {
   private readonly BATCH_SIZE = 50;
   private readonly MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
-  private isScanning = false;
+  private scanPromise: Promise<ScanResult[]> | null = null;
   private scanCancelled = false;
 
   async quickScan(
-    onProgress?: (progress: ScanProgress) => void
+    onProgress?: (progress: ScanProgress) => void,
+    options?: ScanOptions
   ): Promise<ScanResult[]> {
-    return this.performScan('quick', onProgress);
+    return this.performScan('quick', onProgress, options);
   }
 
   async fullScan(
-    onProgress?: (progress: ScanProgress) => void
+    onProgress?: (progress: ScanProgress) => void,
+    options?: ScanOptions
   ): Promise<ScanResult[]> {
-    return this.performScan('full', onProgress);
+    return this.performScan('full', onProgress, options);
   }
 
   cancelScan() {
@@ -51,25 +84,36 @@ class ScanService {
 
   private async performScan(
     type: 'quick' | 'full',
-    onProgress?: (progress: ScanProgress) => void
+    onProgress?: (progress: ScanProgress) => void,
+    options?: ScanOptions
   ): Promise<ScanResult[]> {
-    if (this.isScanning) {
-      throw new Error('Scan already in progress');
+    if (this.scanPromise) {
+      return this.scanPromise;
     }
 
-    this.isScanning = true;
     this.scanCancelled = false;
+   
+    this.scanPromise = this.executeScan(type, onProgress, options);
+    try {
+      return await this.scanPromise;
+    } finally {
+      this.scanPromise = null;
+    }
+  }
 
+  private async executeScan(
+    type: 'quick' | 'full',
+    onProgress?: (progress: ScanProgress) => void,
+    options?: ScanOptions
+  ): Promise<ScanResult[]> {
     const startTime = Date.now();
     const results: ScanResult[] = [];
     let threatsFound = 0;
 
     try {
-      // Get files to scan
       const filesToScan = await this.getFilesToScan(type);
       const totalFiles = filesToScan.length;
 
-      // Process files in batches
       for (let i = 0; i < filesToScan.length; i += this.BATCH_SIZE) {
         if (this.scanCancelled) {
           throw new Error('Scan cancelled by user');
@@ -77,23 +121,20 @@ class ScanService {
 
         const batch = filesToScan.slice(i, i + this.BATCH_SIZE);
         
-        // Hash files in batch
         const hashes = await Promise.all(
           batch.map(file => this.hashFile(file))
         );
 
-        // Check hashes against API
-        const hashCheckResults = await api.post('/scan/hash-check', {
+        const hashCheckResults = await api.post<HashCheckResponse>('/scan/hash-check', {
           hashes: hashes.map(h => h.hash),
           deviceId: await this.getDeviceId(),
         });
 
-        // Map results
         for (let j = 0; j < batch.length; j++) {
           const file = batch[j];
           const hashData = hashes[j];
           const threatData = hashCheckResults.data.results.find(
-            (r: any) => r.hash === hashData.hash
+            (r: HashCheckResult) => r.hash === hashData.hash
           );
 
           const result: ScanResult = {
@@ -112,7 +153,6 @@ class ScanService {
           }
         }
 
-        // Update progress
         if (onProgress) {
           onProgress({
             filesScanned: Math.min(i + this.BATCH_SIZE, totalFiles),
@@ -122,12 +162,25 @@ class ScanService {
           });
         }
 
-        // Rate limiting delay
         await this.delay(100);
       }
 
-      // Report scan completion to backend
       const endTime = Date.now();
+
+      // Prepare threats payload with sanitized paths
+      const threatsPayload = await Promise.all(
+        results
+          .filter(r => r.isThreat)
+          .map(async r => ({
+            fileName: r.file.name,
+            filePath: await this.sanitizePath(r.file.path, options),
+            fileHash: r.hash,
+            threatName: r.threatName || 'Unknown',
+            severity: r.severity || 'Unknown',
+          }))
+      );
+
+      // Report scan completion to backend
       await api.post('/scan/report', {
         deviceId: await this.getDeviceId(),
         scanType: type,
@@ -136,23 +189,29 @@ class ScanService {
         threatsFound,
         startedAt: new Date(startTime).toISOString(),
         completedAt: new Date(endTime).toISOString(),
-        threats: results
-          .filter(r => r.isThreat)
-          .map(r => ({
-            fileName: r.file.name,
-            filePath: r.file.path,
-            fileHash: r.hash,
-            threatName: r.threatName!,
-            severity: r.severity!,
-          })),
+        threats: threatsPayload,
       });
 
       return results;
     } catch (error) {
       console.error('[SCAN_ERROR]', error);
+      
+      // Report scan failure to backend
+      try {
+        await api.post('/scan/report', {
+          deviceId: await this.getDeviceId(),
+          scanType: type,
+          status: 'failed',
+          error: error instanceof Error ? error.message : 'Unknown error',
+          startedAt: new Date(startTime).toISOString(),
+          completedAt: new Date().toISOString(),
+        });
+      } catch (reportError) {
+        console.error('[SCAN_REPORT_ERROR]', reportError);
+      }
+      
       throw error;
     } finally {
-      this.isScanning = false;
       this.scanCancelled = false;
     }
   }
@@ -160,11 +219,9 @@ class ScanService {
   private async getFilesToScan(type: 'quick' | 'full'): Promise<ScanFile[]> {
     const files: ScanFile[] = [];
 
-    // Platform-specific file scanning
     if (Platform.OS === 'android') {
-      // Android: Scan downloads, DCIM, and app directories
       const directories = type === 'quick'
-        ? [FileSystem.documentDirectory, FileSystem.cacheDirectory]
+        ? [Paths.document, Paths.cache]
         : await this.getAndroidScanDirectories();
 
       for (const dir of directories) {
@@ -173,11 +230,7 @@ class ScanService {
         }
       }
     } else {
-      // iOS: Limited to app sandbox
-      const directories = [
-        FileSystem.documentDirectory,
-        FileSystem.cacheDirectory,
-      ];
+      const directories = [Paths.document, Paths.cache];
 
       for (const dir of directories) {
         if (dir) {
@@ -189,86 +242,178 @@ class ScanService {
     return files;
   }
 
-  private async getAndroidScanDirectories(): Promise<string[]> {
-    // Request storage permissions first
-    const { status } = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
-    
-    if (status !== 'granted') {
-      return [FileSystem.documentDirectory, FileSystem.cacheDirectory].filter(Boolean) as string[];
-    }
-
-    // Return common Android directories
-    return [
-      FileSystem.documentDirectory,
-      FileSystem.cacheDirectory,
-      // Note: External storage requires SAF on Android 11+
-    ].filter(Boolean) as string[];
+  private async getAndroidScanDirectories(): Promise<(string | Directory)[]> {
+    // Return basic directories as strings or Directory instances
+    return [Paths.document, Paths.cache].filter(Boolean) as (string | Directory)[];
   }
 
   private async scanDirectory(
-    dirUri: string,
+    dirPath: string | Directory,
     files: ScanFile[],
     recursive: boolean
   ): Promise<void> {
     try {
-      const items = await FileSystem.readDirectoryAsync(dirUri);
+      let directory: Directory;
+      let dirString: string;
 
+      if (typeof dirPath === 'string') {
+        directory = new Directory(dirPath);
+        dirString = dirPath;
+      } else {
+        directory = dirPath;
+        dirString = (directory as any).uri || (directory as any).path || '';
+      }
+      
+      // Check if directory exists
+      if (!(await (directory as any).exists)) {
+        return;
+      }
+
+      // List directory contents
+      const items = await directory.list();
+      
       for (const item of items) {
-        const itemUri = `${dirUri}${item}`;
-        const info = await FileSystem.getInfoAsync(itemUri, { size: true });
+        if (this.scanCancelled) {
+          break;
+        }
 
-        if (info.exists) {
-          if (info.isDirectory && recursive) {
-            await this.scanDirectory(`${itemUri}/`, files, recursive);
-          } else if (!info.isDirectory) {
+        const itemPath = this.joinPath(dirString, typeof item === 'string' ? item : (item as any).uri || (item as any).path || '');
+        
+        try {
+          // Try as directory first
+          const itemDir = new Directory(itemPath);
+          if (await itemDir.exists && recursive) {
+            await this.scanDirectory(itemPath, files, recursive);
+            continue;
+          }
+        } catch {
+          // Not a directory, continue to check as file
+        }
+
+        try {
+          // Check as file
+          const file = new File(itemPath);
+          if (await file.exists) {
+            const size = file.size;
+            
             // Skip very large files
-            if (info.size && info.size <= this.MAX_FILE_SIZE) {
+            if (size && size <= this.MAX_FILE_SIZE) {
               files.push({
-                uri: itemUri,
-                name: item,
-                size: info.size,
-                path: itemUri,
+                uri: file.uri,
+                name: this.getFileName(itemPath),
+                size: size,
+                path: itemPath,
               });
             }
           }
+        } catch (error) {
+          console.warn('[SCAN_FILE_ERROR]', itemPath, error);
         }
       }
     } catch (error) {
-      console.warn('[SCAN_DIRECTORY_ERROR]', dirUri, error);
-      // Continue scanning other directories
+      console.warn('[SCAN_DIRECTORY_ERROR]', typeof dirPath === 'string' ? dirPath : ((dirPath as any).uri || (dirPath as any).path || ''), error);
     }
   }
 
-  private async hashFile(file: ScanFile): Promise<{ file: ScanFile; hash: string }> {
+  private async hashFile(scanFile: ScanFile): Promise<{ file: ScanFile; hash: string }> {
     try {
-      // Read file as base64
-      const content = await FileSystem.readAsStringAsync(file.uri, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
+      const file = new File(scanFile.path);
+      
+      // Read file as bytes first, then convert to base64
+      const bytes = await file.bytes();
+      const base64 = this.bytesToBase64(bytes);
 
       // Hash using SHA-256
       const hash = await Crypto.digestStringAsync(
         Crypto.CryptoDigestAlgorithm.SHA256,
-        content,
+        base64,
         { encoding: Crypto.CryptoEncoding.HEX }
       );
 
-      return { file, hash };
+      return { file: scanFile, hash };
     } catch (error) {
-      console.error('[HASH_FILE_ERROR]', file.name, error);
-      // Return empty hash for failed files
-      return { file, hash: '' };
+      console.error('[HASH_FILE_ERROR]', scanFile.name, error);
+      return { file: scanFile, hash: '' };
     }
   }
 
+  private bytesToBase64(bytes: Uint8Array): string {
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+
   private async getDeviceId(): Promise<string> {
-    // Import from storage utility
     const { getDeviceId } = await import('../utils/storage');
     return getDeviceId();
   }
 
   private delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private async sanitizePath(filePath: string, options?: ScanOptions): Promise<string> {
+    if (!filePath) return '';
+
+    let normalized = filePath.replace(/^file:\/\//, '');
+
+    const mode: PathSanitizationMode = options?.pathSanitization ?? 'home';
+    const root = options?.root;
+
+    if (mode === 'none') {
+      return normalized;
+    }
+
+    if (mode === 'relative' && root) {
+      const rootNorm = root.replace(/^file:\/\//, '');
+      if (normalized.startsWith(rootNorm)) {
+        let rel = normalized.slice(rootNorm.length);
+        if (rel.startsWith('/') || rel.startsWith('\\')) rel = rel.slice(1);
+        return rel || '.';
+      }
+    }
+
+    if (mode === 'home') {
+      normalized = normalized.replace(/(^|[\\/])Users[\\/][^\\/]+/i, '$1~');
+      normalized = normalized.replace(/(^|\/)storage\/emulated\/0/i, '$1~');
+      normalized = normalized.replace(/(^|\/)data\/user\/\d+/i, '$1~');
+      normalized = normalized.replace(/(^|\/)data\/data\/[^\/]+/i, '$1~');
+      return normalized;
+    }
+
+    if (mode === 'filename') {
+      const parts = normalized.split(/[/\\]+/);
+      return parts[parts.length - 1] || normalized;
+    }
+
+    if (mode === 'hashed') {
+      const toHash = (options?.hashSalt ?? '') + normalized;
+      try {
+        const hash = await Crypto.digestStringAsync(
+          Crypto.CryptoDigestAlgorithm.SHA256,
+          toHash,
+          { encoding: Crypto.CryptoEncoding.HEX }
+        );
+        return `hashed:${hash}`;
+      } catch (e) {
+        const parts = normalized.split(/[/\\]+/);
+        return parts[parts.length - 1] || normalized;
+      }
+    }
+
+    return normalized;
+  }
+
+  private joinPath(dirPath: string, item: string): string {
+    const sep = dirPath.endsWith('/') || dirPath.endsWith('\\') ? '' : '/';
+    return dirPath + sep + item;
+  }
+
+  private getFileName(path: string): string {
+    const parts = path.split(/[/\\]+/);
+    return parts[parts.length - 1] || path;
   }
 }
 
