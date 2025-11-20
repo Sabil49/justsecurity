@@ -277,7 +277,11 @@ async function getFilesToScan(type: 'quick' | 'full'): Promise<ScanFile[]> {
  * Gets Android-specific directories for full scan
  */
 async function getAndroidScanDirectories(): Promise<string[]> {
-  return [Paths.document, Paths.cache].filter(Boolean) as unknown[] as string[];
+    return [
+    Paths.document,
+    Paths.cache,
+    Paths.download
+  ].filter(Boolean) as string[];
 }
 
 /**
@@ -387,11 +391,7 @@ async function hashFile(scanFile: ScanFile): Promise<{ file: ScanFile; hash: str
  * Converts byte array to base64 string
  */
 function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
+  return Buffer.from(bytes).toString('base64');
 }
 
 /**

@@ -37,7 +37,7 @@ export async function initialize(): Promise<void> {
     
     // Create quarantine directory if it doesn't exist
     if (!dir.exists) {
-      dir.create();
+      await dir.create();
     }
     
     console.log('[QUARANTINE_INITIALIZED]', dir.uri);
@@ -129,7 +129,7 @@ export async function uploadQuarantinedFile(
     }
 
     // Request signed upload URL
-    const response = await fetch(`${process.env.API_URL}/quarantine/signed-upload`, {
+    const signedUrlResponse = await fetch(`${process.env.API_URL}/quarantine/signed-upload`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -137,7 +137,17 @@ export async function uploadQuarantinedFile(
         fileSize,
         contentType: 'application/octet-stream',
       }),
-    }).then(res => res.json());
+    });
+
+    if (!signedUrlResponse.ok) {
+      throw new Error(`Failed to get signed URL: ${signedUrlResponse.status}`);
+    }
+
+    const response = await signedUrlResponse.json();
+
+    if (!response.data?.uploadUrl || !response.data?.storageKey) {
+      throw new Error('Invalid signed upload response');
+    }
 
     const { uploadUrl, storageKey } = response.data;
 
@@ -163,7 +173,6 @@ export async function uploadQuarantinedFile(
     throw error;
   }
 }
-
 /**
  * Deletes a quarantined file from local storage and notifies backend
  */
@@ -180,14 +189,18 @@ export async function deleteQuarantinedFile(
     }
 
     // Notify backend
-    await fetch(`${process.env.API_URL}/quarantine/delete`, {
+    const response = await fetch(`${process.env.API_URL}/quarantine/delete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         quarantineId,
       }),
-    }).then(res => res.json());
+    });
 
+    if (!response.ok) {
+      throw new Error(`Failed to notify backend of deletion: ${response.status}`);
+    }
+    await response.json();
     console.log('[FILE_DELETED]', quarantineId);
   } catch (error) {
     console.error('[DELETE_ERROR]', error);
@@ -210,7 +223,9 @@ export async function restoreQuarantinedFile(
     if (!sourceFile.exists) {
       throw new Error('Quarantined file does not exist');
     }
-
+    if (destinationFile.exists) {
+      throw new Error('Cannot restore: file already exists at original location');
+    }
     // Move file back to original location
     await sourceFile.move(destinationFile);
 
@@ -233,9 +248,14 @@ export async function listQuarantinedFiles(): Promise<QuarantinedFile[]> {
       body: JSON.stringify({
         deviceId,
       }),
-    }).then(res => res.json());
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to list quarantined files: ${response.status}`);
+    }
 
-    return response.data?.quarantines || [];
+    const data = await response.json();
+
+    return data?.quarantines || [];
   } catch (error) {
     console.error('[LIST_QUARANTINE_ERROR]', error);
     return [];
@@ -256,7 +276,7 @@ export async function clearAllQuarantine(): Promise<void> {
 
     // Recreate directory
     await dir.create();
-
+    quarantineDir = null;
     console.log('[QUARANTINE_CLEARED]');
   } catch (error) {
     console.error('[CLEAR_QUARANTINE_ERROR]', error);
@@ -323,4 +343,4 @@ export async function isFileQuarantined(fileHash: string): Promise<boolean> {
  */
 export function getQuarantinePath(): string {
   return getQuarantineDirectory().uri;
-}
+}   

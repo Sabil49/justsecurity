@@ -109,6 +109,7 @@ export const useAuth = () => {
         await apiClient.post(
           '/device/register',
           {
+            deviceId,
             deviceName: Device.deviceName || 'Mobile Device',
             deviceModel: Device.modelName || undefined,
             osVersion: Platform.OS === 'ios' 

@@ -236,8 +236,8 @@ export const useSubscription = () => {
           startDate: subscription.startDate || null,
           expiryDate: subscription.expiryDate || null,
           isTrialPeriod: subscription.isTrialPeriod || false,
-          autoRenew: true,
-          isExpired: false,
+           autoRenew: subscription.autoRenew !== false,
+          isExpired: subscription.isExpired || false,
           status: subscription.status,
         });
 

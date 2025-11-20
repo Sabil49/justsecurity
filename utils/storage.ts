@@ -276,7 +276,10 @@ export async function setSubscription(
 export async function getSubscriptionTier(): Promise<'FREE' | 'PREMIUM'> {
   try {
     const tier = await getItem(STORAGE_KEYS.SUBSCRIPTION_TIER);
-    return (tier as 'FREE' | 'PREMIUM') || 'FREE';
+    if (tier === 'PREMIUM') {
+      return 'PREMIUM';
+    }
+    return 'FREE';
   } catch (error) {
     console.error('[GET_SUBSCRIPTION_ERROR]', error);
     return 'FREE';
@@ -295,13 +298,21 @@ export async function getSubscriptionExpiry(): Promise<string | null> {
  */
 export async function isSubscriptionExpired(): Promise<boolean> {
   try {
+        const tier = await getSubscriptionTier();
+    if (tier === 'FREE') {
+      return false; // FREE tier never expires
+    }
     const expiryDate = await getSubscriptionExpiry();
 
     if (!expiryDate) {
-      return true; // No expiry date = expired
+      return true; // PREMIUM without expiry = expired
     }
 
-    return new Date() > new Date(expiryDate);
+    const expiry = new Date(expiryDate);
+    if (isNaN(expiry.getTime())) {
+      return true; // Invalid date = expired
+    }
+    return new Date() > expiry;
   } catch (error) {
     console.error('[CHECK_EXPIRY_ERROR]', error);
     return true;
@@ -499,9 +510,9 @@ export async function isAppLockEnabled(): Promise<boolean> {
 }
 
 /**
- * Generate and store telemetry session ID
+ * Generate and store telemetry installation ID
  */
-export async function getTelemetrySessionId(): Promise<string> {
+export async function getTelemetryInstallationId(): Promise<string> {
   try {
     let sessionId = await getItem(STORAGE_KEYS.TELEMETRY_SESSION_ID);
 
@@ -572,8 +583,18 @@ export async function checkStorageHealth(): Promise<{
  */
 export async function exportStorageData(): Promise<Record<string, string | null>> {
   try {
-    const allData = await AsyncStorage.getAllKeys().then((keys) =>
-      Promise.all(keys.map((key) => getItem(key as StorageKey).then((value) => [key, value])))
+    const allKeys = await AsyncStorage.getAllKeys();
+    
+    // Filter out sensitive keys to truly exclude sensitive data
+    const nonSensitiveKeys = allKeys.filter(key => 
+      !SENSITIVE_KEYS.has(key as StorageKey)
+    );
+    
+    const allData = await Promise.all(
+      nonSensitiveKeys.map(async (key) => {
+        const value = await AsyncStorage.getItem(key);
+        return [key, value] as [string, string | null];
+      })
     );
 
     return Object.fromEntries(allData);
