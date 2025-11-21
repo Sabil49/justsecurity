@@ -1,11 +1,13 @@
 // app/(tabs)/index.tsx
-import { useSubscription } from '@/hooks/useSubscription';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useEffect, useState } from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useState, useEffect } from 'react';
+import { useAuth } from '@/hooks/useAuth';
+import { useSubscription } from '@/hooks/useSubscription';
 
 export default function DashboardScreen() {
   const router = useRouter();
+  const { user } = useAuth();
   const { subscription } = useSubscription();
   const [lastScan, setLastScan] = useState<Date | null>(null);
   const [securityScore, setSecurityScore] = useState(95);
@@ -18,15 +20,6 @@ export default function DashboardScreen() {
   const loadDashboardData = async () => {
     // Load last scan info, security score, etc.
     // This would query local storage or API
-    try {
-      // Example: Load last scan date from storage
-      // const lastScanData = await getItem('lastScanDate');
-      // if (lastScanData) {
-      //   setLastScan(new Date(lastScanData));
-      // }
-    } catch (error) {
-      console.error('[LOAD_DASHBOARD_ERROR]', error);
-    }
   };
 
   return (
@@ -37,21 +30,10 @@ export default function DashboardScreen() {
         {String(subscription?.tier) === 'free' && (
           <TouchableOpacity 
             style={styles.upgradeButton}
-            onPress={() => router.push('/subscription')}
+            onPress={() => router.push('/subscription' as any)}
           >
             <Text style={styles.upgradeText}>UPGRADE</Text>
           </TouchableOpacity>
-        )}
-      </View>
-
-      {/* Security Score */}
-      <View style={styles.scoreContainer}>
-        <Text style={styles.scoreLabel}>Security Score</Text>
-        <Text style={styles.scoreValue}>{securityScore}</Text>
-        {threatCount > 0 && (
-          <Text style={styles.threatText}>
-            {threatCount} {threatCount === 1 ? 'threat' : 'threats'} detected
-          </Text>
         )}
       </View>
 
@@ -59,8 +41,7 @@ export default function DashboardScreen() {
       <View style={styles.scanContainer}>
         <TouchableOpacity
           style={styles.scanButton}
-          onPress={() => router.push('/scan')}
-          activeOpacity={0.8}
+          onPress={() => router.push('/scan' as any)}
         >
           <View style={styles.scanButtonInner}>
             <Text style={styles.scanButtonText}>SCAN NOW</Text>
@@ -84,14 +65,14 @@ export default function DashboardScreen() {
           icon="🛡️"
           title="Hack alerts"
           isPremium={false}
-          onPress={() => router.push('/hack-alerts')}
+          onPress={() => router.push('/hack-alerts' as any)}
         />
         
         <FeatureCard
           icon="🧹"
           title="Clean junk"
           isPremium={false}
-          onPress={() => router.push('/clean-junk')}
+          onPress={() => router.push('/clean-junk' as any)}
         />
         
         <FeatureCard
@@ -99,7 +80,7 @@ export default function DashboardScreen() {
           title="Check speed"
           color="#ff4757"
           isPremium={false}
-          onPress={() => router.push('/speed-test')}
+          onPress={() => router.push('/speed-test' as any)}
         />
         
         <FeatureCard
@@ -110,9 +91,9 @@ export default function DashboardScreen() {
           locked={String(subscription?.tier) === 'free'}
           onPress={() => {
             if (String(subscription?.tier) === 'free') {
-              router.push('/subscription');
+              router.push('/subscription' as any);
             } else {
-              router.push('/auto-scan');
+              router.push('/auto-scan' as any);
             }
           }}
         />
@@ -129,8 +110,7 @@ export default function DashboardScreen() {
           </Text>
           <TouchableOpacity
             style={styles.upgradePromptButton}
-            onPress={() => router.push('/subscription')}
-            activeOpacity={0.8}
+            onPress={() => router.push('/subscription' as any)}
           >
             <Text style={styles.upgradePromptButtonText}>UPGRADE</Text>
           </TouchableOpacity>
@@ -163,7 +143,6 @@ function FeatureCard({
     <TouchableOpacity
       style={[styles.card, color && { backgroundColor: color }]}
       onPress={onPress}
-      activeOpacity={0.8}
     >
       <View style={styles.cardIcon}>
         <Text style={styles.cardIconText}>{icon}</Text>
@@ -174,12 +153,7 @@ function FeatureCard({
       )}
       {locked && (
         <View style={styles.cardLock}>
-          <Text style={styles.lockIcon}>🔒</Text>
-        </View>
-      )}
-      {isPremium && !locked && (
-        <View style={styles.cardBadge}>
-          <Text style={styles.badgeText}>PRO</Text>
+          <Text>🔒</Text>
         </View>
       )}
     </TouchableOpacity>
@@ -190,12 +164,7 @@ function formatLastScan(date: Date): string {
   const now = new Date();
   const diff = now.getTime() - date.getTime();
   const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-  const hours = Math.floor(diff / (1000 * 60 * 60));
-  const minutes = Math.floor(diff / (1000 * 60));
   
-  if (minutes < 1) return 'just now';
-  if (minutes < 60) return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago`;
-  if (hours < 24) return `${hours} ${hours === 1 ? 'hour' : 'hours'} ago`;
   if (days === 0) return 'today';
   if (days === 1) return '1 day ago';
   return `${days} days ago`;
@@ -229,25 +198,6 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     fontSize: 12,
   },
-  scoreContainer: {
-    alignItems: 'center',
-    paddingVertical: 20,
-  },
-  scoreLabel: {
-    color: '#95a5a6',
-    fontSize: 14,
-    marginBottom: 8,
-  },
-  scoreValue: {
-    color: '#2ecc71',
-    fontSize: 48,
-    fontWeight: 'bold',
-  },
-  threatText: {
-    color: '#e74c3c',
-    fontSize: 14,
-    marginTop: 8,
-  },
   scanContainer: {
     alignItems: 'center',
     paddingVertical: 40,
@@ -260,11 +210,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 8,
   },
   scanButtonInner: {
     width: 180,
@@ -301,11 +246,6 @@ const styles = StyleSheet.create({
     padding: 16,
     margin: '1%',
     justifyContent: 'space-between',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 4,
   },
   cardIcon: {
     width: 48,
@@ -332,33 +272,11 @@ const styles = StyleSheet.create({
     top: 12,
     right: 12,
   },
-  lockIcon: {
-    fontSize: 20,
-  },
-  cardBadge: {
-    position: 'absolute',
-    top: 12,
-    right: 12,
-    backgroundColor: '#f39c12',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 4,
-  },
-  badgeText: {
-    color: '#000',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
   upgradePrompt: {
     backgroundColor: '#34495e',
     margin: 20,
     padding: 20,
     borderRadius: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 4,
   },
   upgradePromptTitle: {
     color: '#fff',
@@ -370,7 +288,6 @@ const styles = StyleSheet.create({
     color: '#bdc3c7',
     fontSize: 14,
     marginBottom: 16,
-    lineHeight: 20,
   },
   upgradePromptButton: {
     backgroundColor: '#2ecc71',

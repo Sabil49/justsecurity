@@ -47,6 +47,36 @@ const createAxiosInstance = (): AxiosInstance => {
 
   return instance;
 };
+
+/**
+ * Sanitize an object by masking sensitive fields (works recursively for nested objects/arrays)
+ */
+function sanitizeObject(obj: any, sensitiveFields: string[]): any {
+  if (obj == null) return obj;
+  if (Array.isArray(obj)) {
+    return obj.map(item => sanitizeObject(item, sensitiveFields));
+  }
+  if (typeof obj !== 'object') {
+    return obj;
+  }
+
+  const result: any = {};
+  for (const [key, value] of Object.entries(obj)) {
+    const isSensitive = sensitiveFields.some(
+      field => field.toLowerCase() === key.toLowerCase()
+    );
+
+    if (isSensitive) {
+      // mask sensitive values
+      result[key] = '***';
+    } else if (value && typeof value === 'object') {
+      result[key] = sanitizeObject(value, sensitiveFields);
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
 /**
  * Attach interceptors to an axios instance
  */
@@ -61,13 +91,15 @@ function attachInterceptors(instance: AxiosInstance) {
         }
         config.headers['X-Request-ID'] = generateRequestId();
         // Sanitize sensitive fields before logging
-        const sensitiveFields = ['password', 'token', 'apiKey', 'secret', 'email', 'ssn'];
+         const sensitiveFields = ['password', 'token', 'apiKey', 'secret', 'email', 'ssn'];
+        const sanitizedData = config.data ? sanitizeObject(config.data, sensitiveFields) : undefined;
+        const sanitizedParams = config.params ? sanitizeObject(config.params, sensitiveFields) : undefined; 
         if (__DEV__) {
-          console.log(`[API_REQUEST] ${config.method?.toUpperCase()} ${config.url}`, {
-            params: config.params,
-            data: config.data,
-          });
-        }
+           console.log(`[API_REQUEST] ${config.method?.toUpperCase()} ${config.url}`, {
+              params: sanitizedParams,
+             data: sanitizedData,
+           });
+         }
         return config;
       } catch (error) {
         console.error('[REQUEST_INTERCEPTOR_ERROR]', error);
@@ -91,7 +123,34 @@ function attachInterceptors(instance: AxiosInstance) {
       return response;
     },
     async (error: AxiosError) => {
-      // ... (move entire error handling logic here)
+            const config = error.config as InternalAxiosRequestConfig;
+      const status = error.response?.status;
+
+      if (!config) {
+        return Promise.reject(handleApiError(error));
+      }
+
+      try {
+        // Handle 401 Unauthorized - Token Refresh
+        if (status === 401) {
+          return await handleUnauthorized(config, error);
+        }
+
+        // Handle 429 Rate Limit
+        if (status === 429) {
+          return await handleRateLimit(config, error);
+        }
+
+        // Handle 5xx Server Errors
+        if (status && status >= 500) {
+          return await handleServerError(config, error);
+        }
+
+        // For all other errors, convert to APIError
+        return Promise.reject(handleApiError(error));
+      } catch (handlerError) {
+        return Promise.reject(handleApiError(handlerError));
+      }
     }
   );
 }
@@ -203,46 +262,48 @@ async function handleUnauthorized(
  * Generic retry handler with exponential backoff
  */
 async function handleRetry(
-  config: InternalAxiosRequestConfig,
-  errorCode: string,
-  errorMessage: string,
-  logPrefix: string
-): Promise<any> {
-  const retryCount = (config as any).retryCount || 0;
-
-  if (retryCount < MAX_RETRIES) {
-    const delay = RETRY_DELAY * Math.pow(2, retryCount);
-    (config as any).retryCount = retryCount + 1;
-
-    console.warn(`[${logPrefix}] Retrying after ${delay}ms (attempt ${retryCount + 1})`);
-
-    await new Promise(resolve => setTimeout(resolve, delay));
-    return axiosInstance(config);
-  }
-
-  return Promise.reject(
-    new APIError(
-      (config as any).status || 429,
-      errorCode,
-      errorMessage
-    )
-  );
-}
+   config: InternalAxiosRequestConfig,
+  status: number,
+   errorCode: string,
+   errorMessage: string,
+   logPrefix: string
+ ): Promise<any> {
+   const retryCount = (config as any).retryCount || 0;
+ 
+   if (retryCount < MAX_RETRIES) {
+     const delay = RETRY_DELAY * Math.pow(2, retryCount);
+     (config as any).retryCount = retryCount + 1;
+ 
+     console.warn(`[${logPrefix}] Retrying after ${delay}ms (attempt ${retryCount + 1})`);
+ 
+     await new Promise(resolve => setTimeout(resolve, delay));
+     return axiosInstance(config);
+   }
+ 
+   return Promise.reject(
+     new APIError(
+       status,
+       errorCode,
+       errorMessage
+     )
+   );
+ }
 
 /**
  * Handle 429 Rate Limit - Exponential Backoff Retry
  */
 async function handleRateLimit(
-  config: InternalAxiosRequestConfig,
-  error: AxiosError
-) {
-  return handleRetry(
-   config,
-    'RATE_LIMITED',
-    'Too many requests. Please try again later.',
-    'RATE_LIMITED'
-  );
-}
+   config: InternalAxiosRequestConfig,
+   error: AxiosError
+ ) {
+   return handleRetry(
+    config,
+    error.response?.status || 429,
+     'RATE_LIMITED',
+     'Too many requests. Please try again later.',
+     'RATE_LIMITED'
+   );
+ }
 
 /**
  * Handle 5xx Server Errors - Automatic Retry

@@ -197,7 +197,8 @@ export async function deleteQuarantinedFile(
       }),
     });
 
-    if (!response.ok) {
+      if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
       throw new Error(`Failed to notify backend of deletion: ${response.status}`);
     }
     await response.json();
@@ -273,10 +274,11 @@ export async function clearAllQuarantine(): Promise<void> {
     if (dir.exists) {
       await dir.delete();
     }
-
-    // Recreate directory
-    await dir.create();
     quarantineDir = null;
+    // Recreate directory
+    const newDir = getQuarantineDirectory();
+    await newDir.create();
+    
     console.log('[QUARANTINE_CLEARED]');
   } catch (error) {
     console.error('[CLEAR_QUARANTINE_ERROR]', error);
